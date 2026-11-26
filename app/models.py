@@ -79,6 +79,13 @@ class DeviceResponse(BaseModel):
         return _validate_ipv4(value)
 
 
+class DeviceSummary(BaseModel):
+    total_devices: int
+    online_count: int
+    offline_count: int
+    device_types: list[DeviceType]
+
+
 class AlertResponse(BaseModel):
     device_id: str
     message: str

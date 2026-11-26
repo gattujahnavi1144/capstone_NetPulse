@@ -1,11 +1,8 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, status
 
 from app.dependencies import device_service
-from app.models import DeviceCreate, DeviceResponse, StatusUpdate
-from app.services.device_service import (
-    DeviceAlreadyExistsError,
-    DeviceNotFoundError,
-)
+from app.models import DeviceCreate, DeviceResponse, DeviceSummary, StatusUpdate
+from app.services.probe import simulate_device_probe
 
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -27,12 +24,12 @@ def list_devices() -> list[DeviceResponse]:
     },
 )
 def create_device(data: DeviceCreate) -> DeviceResponse:
-    try:
-        return device_service.create_device(data)
-    except DeviceAlreadyExistsError as error:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(error)
-        ) from error
+    return device_service.create_device(data)
+
+
+@router.get("/summary", response_model=DeviceSummary)
+def get_device_summary() -> DeviceSummary:
+    return device_service.get_device_summary()
 
 
 @router.get(
@@ -41,10 +38,13 @@ def create_device(data: DeviceCreate) -> DeviceResponse:
     responses={status.HTTP_404_NOT_FOUND: {"description": "Device not found"}},
 )
 def get_device(device_id: str) -> DeviceResponse:
-    try:
-        return device_service.get(device_id)
-    except DeviceNotFoundError as error:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    return device_service.get(device_id)
+
+
+@router.get("/{device_id}/probe")
+async def probe_device(device_id: str) -> dict[str, str | bool]:
+    device_service.get_device(device_id)
+    return await simulate_device_probe(device_id)
 
 
 @router.patch(
@@ -53,7 +53,4 @@ def get_device(device_id: str) -> DeviceResponse:
     responses={status.HTTP_404_NOT_FOUND: {"description": "Device not found"}},
 )
 def update_device_status(device_id: str, data: StatusUpdate) -> DeviceResponse:
-    try:
-        return device_service.update_status(device_id, data.status)
-    except DeviceNotFoundError as error:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    return device_service.update_status(device_id, data.status)

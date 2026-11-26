@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.models import AlertResponse
-from app.repositories.device_repository import InMemoryDeviceRepository
+from app.repositories.contracts import DeviceRepository
 
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ def publish(event: DeviceCreated) -> None:
 
 
 def create_offline_alert(
-    repository: InMemoryDeviceRepository, device_id: str
+    repository: DeviceRepository, device_id: str
 ) -> None:
     alert = AlertResponse(
         device_id=device_id,

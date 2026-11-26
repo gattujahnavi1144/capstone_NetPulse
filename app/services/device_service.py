@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 from app.events import DeviceCreated, create_offline_alert, publish
-from app.models import DeviceCreate, DeviceResponse, DeviceStatus, DeviceUpdate
-from app.repositories.device_repository import InMemoryDeviceRepository
+from app.models import (
+    DeviceCreate,
+    DeviceResponse,
+    DeviceStatus,
+    DeviceSummary,
+    DeviceType,
+    DeviceUpdate,
+)
+from app.repositories.contracts import DeviceRepository
 
 
 class DeviceAlreadyExistsError(Exception):
@@ -14,7 +21,7 @@ class DeviceNotFoundError(Exception):
 
 
 class DeviceService:
-    def __init__(self, repository: InMemoryDeviceRepository) -> None:
+    def __init__(self, repository: DeviceRepository) -> None:
         self._repository = repository
 
     def register(self, device: DeviceResponse) -> DeviceResponse:
@@ -32,6 +39,22 @@ class DeviceService:
 
     def list_devices(self) -> list[DeviceResponse]:
         return self.list()
+
+    def get_device_summary(self) -> DeviceSummary:
+        devices = self._repository.list_devices()
+        status_counts = {"online": 0, "offline": 0}
+        device_types: set[DeviceType] = set()
+
+        for device in devices:
+            status_counts[device.status] += 1
+            device_types.add(device.device_type)
+
+        return DeviceSummary(
+            total_devices=len(devices),
+            online_count=status_counts["online"],
+            offline_count=status_counts["offline"],
+            device_types=sorted(device_types),
+        )
 
     def create_device(self, data: DeviceCreate) -> DeviceResponse:
         return self.register(DeviceResponse(**data.model_dump()))
