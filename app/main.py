@@ -1,13 +1,23 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
+from app.db import models as db_models
+from app.db.database import engine
 from app.routes.alerts import router as alerts_router
 from app.routes.devices import router as devices_router
 from app.routes.health import router as health_router
 from app.services.device_service import DeviceAlreadyExistsError, DeviceNotFoundError
 
 
-app = FastAPI(title="NetPulse API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+	db_models.Base.metadata.create_all(bind=engine)
+	yield
+
+
+app = FastAPI(title="NetPulse API", lifespan=lifespan)
 
 
 @app.exception_handler(DeviceAlreadyExistsError)
