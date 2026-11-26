@@ -1,11 +1,14 @@
 from fastapi import APIRouter, status
+import structlog
 
 from app.dependencies import DeviceServiceDep
+from app.logging_config import safe_device_id
 from app.models import DeviceCreate, DeviceResponse, DeviceSummary, StatusUpdate
 from app.services.probe import simulate_device_probe
 
 
 router = APIRouter(prefix="/devices", tags=["devices"])
+logger = structlog.get_logger(__name__)
 
 
 @router.get("", response_model=list[DeviceResponse])
@@ -24,6 +27,7 @@ def list_devices(device_service: DeviceServiceDep) -> list[DeviceResponse]:
     },
 )
 def create_device(data: DeviceCreate, device_service: DeviceServiceDep) -> DeviceResponse:
+    logger.info("device_registration_requested", device_id=safe_device_id(data.device_id))
     return device_service.create_device(data)
 
 

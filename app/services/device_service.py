@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import structlog
+
 from app.events import DeviceCreated, create_offline_alert, publish
+from app.logging_config import safe_device_id
 from app.models import (
     DeviceCreate,
     DeviceResponse,
@@ -12,11 +15,20 @@ from app.models import (
 from app.repositories.contracts import DeviceRepository
 
 
-class DeviceAlreadyExistsError(Exception):
+logger = structlog.get_logger(__name__)
+
+
+class DeviceError(Exception):
+    def __init__(self, *args: object, device_id: str | None = None) -> None:
+        super().__init__(*args)
+        self.device_id = device_id
+
+
+class DeviceAlreadyExistsError(DeviceError):
     pass
 
 
-class DeviceNotFoundError(Exception):
+class DeviceNotFoundError(DeviceError):
     pass
 
 
@@ -27,7 +39,7 @@ class DeviceService:
     def register(self, device: DeviceResponse) -> DeviceResponse:
         if self._repository.get_device(device.device_id) is not None:
             raise DeviceAlreadyExistsError(
-                f"Device {device.device_id} is already registered"
+                f"Device {device.device_id} is already registered", device_id=device.device_id
             )
 
         registered = self._repository.add_device(device)
@@ -62,7 +74,7 @@ class DeviceService:
     def get(self, device_id: str) -> DeviceResponse:
         device = self._repository.get_device(device_id)
         if device is None:
-            raise DeviceNotFoundError(f"Device {device_id} was not found")
+            raise DeviceNotFoundError(f"Device {device_id} was not found", device_id=device_id)
         return device
 
     def get_device(self, device_id: str) -> DeviceResponse:
@@ -74,10 +86,15 @@ class DeviceService:
         device = self.get(device_id)
         updated = self._repository.update_status(device_id, new_status)
         if updated is None:
-            raise DeviceNotFoundError(f"Device {device_id} was not found")
+            raise DeviceNotFoundError(f"Device {device_id} was not found", device_id=device_id)
 
-        if device.status == "online" and updated.status == "offline":
+        alert_created = device.status == "online" and updated.status == "offline"
+        if alert_created:
             create_offline_alert(self._repository, device_id)
+        if device.status != updated.status:
+            logger.info("device_status_changed", device_id=safe_device_id(device_id))
+        if alert_created:
+            logger.info("offline_alert_created", device_id=safe_device_id(device_id))
         return updated
 
     def update_device(self, device_id: str, data: DeviceUpdate) -> DeviceResponse:
@@ -94,4 +111,4 @@ class DeviceService:
 
     def delete_device(self, device_id: str) -> None:
         if not self._repository.delete_device(device_id):
-            raise DeviceNotFoundError(f"Device {device_id} was not found")
+            raise DeviceNotFoundError(f"Device {device_id} was not found", device_id=device_id)

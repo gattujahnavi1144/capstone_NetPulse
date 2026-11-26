@@ -1,8 +1,11 @@
 from datetime import timedelta
+import json
+import logging
 
 import pytest
 
 from app.models import DeviceCreate, DeviceResponse, DeviceStatus, DeviceType
+from app.logging_config import configure_logging
 from app.repositories.device_repository import InMemoryDeviceRepository
 from app.services.device_service import (
     DeviceAlreadyExistsError,
@@ -45,6 +48,31 @@ def test_registration(device_context: tuple[InMemoryDeviceRepository, DeviceServ
     assert created.device_id == "RTR-101"
     assert service.get("RTR-101") == created
     assert service.list() == [created]
+
+
+def test_device_logging(
+    device_context: tuple[InMemoryDeviceRepository, DeviceService], caplog, monkeypatch
+) -> None:
+    _, service = device_context
+    app_logger = logging.getLogger("app")
+    monkeypatch.setattr(app_logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(app_logger, "level", app_logger.level)
+    monkeypatch.setattr(app_logger, "propagate", app_logger.propagate)
+    configure_logging()
+    with caplog.at_level(logging.INFO, logger="app"):
+        service.register(build_device())
+        service.register(build_device("token=secret"))
+        with pytest.raises(DeviceNotFoundError):
+            service.get("RTR-404")
+        with pytest.raises(DeviceNotFoundError):
+            service.get("password=secret\ntoken=secret")
+
+    events = [json.loads(record.getMessage()) for record in caplog.records]
+    assert [(event["event"], event["level"], event["device_id"]) for event in events] == [
+        ("device_registered", "info", "RTR-101"),
+        ("device_registered", "info", "[redacted]"),
+    ]
+    assert all(set(event) == {"event", "level", "timestamp", "device_id"} for event in events)
 
 
 def test_device_summary_counts_and_sorts_unique_types(

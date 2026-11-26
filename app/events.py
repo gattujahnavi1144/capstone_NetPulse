@@ -1,12 +1,14 @@
-import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+import structlog
+
+from app.logging_config import safe_device_id
 from app.models import AlertResponse
 from app.repositories.contracts import DeviceRepository
 
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -17,7 +19,7 @@ class DeviceCreated:
 
 def publish(event: DeviceCreated) -> None:
     """Publish a domain event to the application's configured event sink."""
-    logger.info("Device created: id=%s name=%s", event.device_id, event.name)
+    logger.info("device_registered", device_id=safe_device_id(event.device_id))
 
 
 def create_offline_alert(

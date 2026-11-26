@@ -1,9 +1,138 @@
 import asyncio
 import json
+import logging
+import re
+import sys
+from datetime import datetime
+
+import pytest
+import structlog
+from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.db import database
+from app.db.models import AlertRow, DeviceRow
 from app.main import app
 from app.repositories.sqlalchemy_device_repository import SQLAlchemyDeviceRepository
+
+
+@pytest.fixture
+def client(session_factory, isolate_application_database, monkeypatch, capfd):
+    def override_get_session():
+        session = session_factory()
+        try:
+            yield session
+            session.commit()
+        except BaseException:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def unexpected_session():
+        raise AssertionError("Application session factory must not be used by TestClient")
+
+    monkeypatch.setattr(database, "SessionLocal", unexpected_session)
+    app_logger = logging.getLogger("app")
+    monkeypatch.setattr(app_logger, "handlers", [])
+    monkeypatch.setattr(app_logger, "level", app_logger.level)
+    monkeypatch.setattr(app_logger, "propagate", app_logger.propagate)
+    app.dependency_overrides[database.get_session] = override_get_session
+    try:
+        with TestClient(app) as test_client:
+            monkeypatch.setattr(app_logger.handlers[0], "stream", sys.__stderr__)
+            yield test_client
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("supplied_id", [None, "client-ID_123", "bad token=secret"])
+def test_client_request_ids_and_rendered_logs(client, capfd, supplied_id) -> None:
+    headers = {"X-Request-ID": supplied_id} if supplied_id is not None else {}
+    response = client.get("/devices/RTR-404?token=querysecret", headers=headers)
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Device RTR-404 was not found"}
+    request_id = response.headers["X-Request-ID"]
+    if supplied_id == "client-ID_123":
+        assert request_id == supplied_id
+    else:
+        assert re.fullmatch(r"[0-9a-f]{32}", request_id)
+
+    output = capfd.readouterr().err
+    events = [json.loads(line) for line in output.splitlines()]
+    assert [event["event"] for event in events] == ["device_error", "request_completed"]
+    for event in events:
+        assert event["request_id"] == request_id
+        assert event["level"] in {"info", "warning"}
+        assert datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
+    assert events[0]["device_id"] == "RTR-404"
+    assert events[1]["path"] == "/devices/{device_id}"
+    assert events[1]["status_code"] == 404
+    assert "querysecret" not in output and "bad token=secret" not in output
+
+
+def test_client_redaction_uses_rendered_json(client, capfd) -> None:
+    structlog.get_logger("app.test").info(
+        "redaction_test", token="DEMO-DO-NOT-USE", device_id="RTRTEST"
+    )
+    output = capfd.readouterr().err
+    event = json.loads(output.strip())
+    assert event["token"] == "***"
+    assert event["device_id"] == "RTRTEST"
+    assert "DEMO-DO-NOT-USE" not in output
+
+
+def test_client_persists_one_alert_and_preserves_errors(client, session_factory) -> None:
+    device = {
+        "device_id": "RTR-101",
+        "name": "Core Router",
+        "device_type": "router",
+        "ip_address": "192.0.2.10",
+    }
+    created = client.post("/devices", json=device)
+    assert created.status_code == 201
+    assert set(created.json()) == {"device_id", "name", "device_type", "ip_address", "status", "created_at"}
+    assert created.json()["status"] == "online"
+    duplicate = client.post("/devices", json=device)
+    assert duplicate.status_code == 409
+    assert duplicate.json() == {"detail": "Device RTR-101 is already registered"}
+    missing = client.get("/devices/RTR-404")
+    assert missing.status_code == 404
+    assert missing.json() == {"detail": "Device RTR-404 was not found"}
+
+    for _ in range(2):
+        response = client.patch("/devices/RTR-101/status", json={"status": "offline"})
+        assert response.status_code == 200
+        assert response.json()["status"] == "offline"
+    alerts = client.get("/alerts").json()
+    assert len(alerts) == 1
+    assert set(alerts[0]) == {"device_id", "message", "timestamp"}
+    assert alerts[0]["device_id"] == "RTR-101"
+    assert alerts[0]["message"] == "Device RTR-101 went offline."
+    with session_factory() as session:
+        rows = session.scalars(select(AlertRow)).all()
+        assert len(rows) == 1
+        assert rows[0].device_id == "RTR-101"
+        assert session.get(DeviceRow, "RTR-101").status == "offline"
+
+
+def test_client_rolls_back_failed_alert(client, session_factory, monkeypatch) -> None:
+    device = {
+        "device_id": "RTR-101", "name": "Core Router", "device_type": "router",
+        "ip_address": "192.0.2.10",
+    }
+    assert client.post("/devices", json=device).status_code == 201
+
+    def fail_alert(_repository, _alert):
+        raise RuntimeError("test alert failure")
+
+    monkeypatch.setattr(SQLAlchemyDeviceRepository, "save_alert", fail_alert)
+    with pytest.raises(RuntimeError, match="test alert failure"):
+        client.patch("/devices/RTR-101/status", json={"status": "offline"})
+    with session_factory() as session:
+        assert session.get(DeviceRow, "RTR-101").status == "online"
+        assert session.scalars(select(AlertRow)).all() == []
 
 
 def test_database_api_workflow(session_factory, monkeypatch) -> None:
@@ -66,8 +195,8 @@ def test_database_api_workflow(session_factory, monkeypatch) -> None:
             status, created = await request("POST", "/devices", device)
             assert status == 201
             assert created["status"] == "online"
-            assert (await request("POST", "/devices", device))[0] == 409
-            assert (await request("GET", "/devices/missing"))[0] == 404
+            assert await request("POST", "/devices", device) == (409, {"detail": "Device RTR-101 is already registered"})
+            assert await request("GET", "/devices/missing") == (404, {"detail": "Device missing was not found"})
             assert (await request("PATCH", "/devices/missing/status", {"status": "offline"}))[0] == 404
             assert (await request("POST", "/devices", {**device, "ip_address": "invalid"}))[0] == 422
 
